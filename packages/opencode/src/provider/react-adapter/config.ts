@@ -23,6 +23,8 @@
  * }
  * ```
  */
+export * as ReactAdapterConfig from "./config"
+
 export type Config = {
   /** Prefix for injected tool results. Deliberately NOT "Observation" — that label is high-frequency ReAct training data and participates in echo/recitation failures. */
   resultPrefix: string

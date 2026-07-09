@@ -85,7 +85,7 @@ function renderToolResult(part: LanguageModelV3ToolResultPart, cfg: Config) {
         return `ERROR: the user denied execution of this tool call${output.reason ? ` (${output.reason})` : ""}`
       case "content":
         return output.value
-          .map((c) => (c.type === "text" ? c.text : `[attachment omitted: ${"mediaType" in c ? c.mediaType : c.url}]`))
+          .map((c) => (c.type === "text" ? c.text : `[attachment omitted: ${c.type}]`))
           .join("\n")
     }
   })()
