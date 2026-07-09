@@ -12,6 +12,7 @@ import { LLMClient } from "@opencode-ai/llm/route"
 import type { LLMClientService } from "@opencode-ai/llm/route"
 import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
+import { ReactAdapter } from "@/provider/react-adapter"
 import { Config } from "@/config/config"
 import type { Agent } from "@/agent/agent"
 import type { MessageV2 } from "./message-v2"
@@ -339,6 +340,10 @@ const live: Layer.Layer<
                   return args.params
                 },
               },
+              // Degraded-provider mode: converts native tool calling to a ReAct
+              // text protocol when the provider config sets options.reactMode.
+              // Returns [] otherwise, leaving behavior stock.
+              ...ReactAdapter.middleware(item.options),
             ],
           }),
           experimental_telemetry: {
