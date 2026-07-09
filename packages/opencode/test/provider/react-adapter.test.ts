@@ -57,11 +57,13 @@ describe("react-adapter parse", () => {
     expect((parsed as any).input).toBe("not json at all")
   })
 
-  test("malformed JSON falls back through the ladder", () => {
+  test("malformed JSON passes through raw for repair, never becomes a bare string", () => {
     const parsed = parse('Action: bash\nAction Input: {"command": "echo hi",}', SCHEMAS)
     expect(parsed.kind).toBe("action")
-    // trailing comma is invalid JSON; bare-string wrap catches it
-    expect(JSON.parse((parsed as any).input)).toEqual({ command: '{"command": "echo hi",}' })
+    // trailing comma is invalid JSON; it must reach repairToolCall raw instead
+    // of being wrapped as a shell command
+    expect((parsed as any).input).toBe('{"command": "echo hi",}')
+    expect((parsed as any).warnings.join()).toContain("not parseable JSON")
   })
 
   test("multiple Actions takes the first and warns", () => {

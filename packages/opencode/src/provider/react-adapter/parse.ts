@@ -66,9 +66,13 @@ function resolveInput(raw: string, schema: JSONSchema7 | undefined, warnings: st
     }
   }
 
+  // Input that looks like JSON but failed every parse attempt is malformed
+  // JSON, not a bare string — let repairToolCall handle it rather than
+  // wrapping garbage as e.g. a shell command.
+  const looksLikeJSON = trimmed.startsWith("{") || trimmed.startsWith("[")
   const properties = schema?.properties
   const required = schema?.required ?? []
-  if (properties && required.length === 1) {
+  if (!looksLikeJSON && properties && required.length === 1) {
     const only = properties[required[0]]
     if (typeof only === "object" && only.type === "string") {
       warnings.push(`wrapped bare-string action input as {"${required[0]}": ...}`)
