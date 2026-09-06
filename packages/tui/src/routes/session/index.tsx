@@ -52,6 +52,7 @@ import type { PromptInfo } from "../../component/prompt/history"
 import { DialogConfirm } from "../../ui/dialog-confirm"
 import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
+import { DialogSelect } from "../../ui/dialog-select"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
 import { SubagentFooter } from "./subagent-footer.tsx"
@@ -661,6 +662,55 @@ export function Session() {
           sessionID: route.sessionID,
           messageID: message.id,
         })
+      },
+    },
+    {
+      title: "Resync model context (react-adapter)",
+      value: "session.react.reseed",
+      category: "Session",
+      slash: {
+        name: "reseed",
+      },
+      run: () => {
+        dialog.clear()
+        void sdk.client.session
+          .reactReseed({ sessionID: route.sessionID })
+          .then(() => toast.show({ message: "Context will be re-sent in full on the next request", variant: "success" }))
+          .catch((error) => toast.show({ message: errorMessage(error), variant: "error" }))
+      },
+    },
+    {
+      title: "Transcript mode (react-adapter)",
+      value: "session.react.mode",
+      category: "Session",
+      slash: {
+        name: "react",
+      },
+      run: () => {
+        const modes = [
+          { title: "Default (provider config)", value: null, description: "clear the per-session override" },
+          { title: "alternating", value: "alternating", description: "plain user/assistant messages" },
+          { title: "single", value: "single", description: "whole transcript in one message per request" },
+          { title: "epoch", value: "epoch", description: "cached snapshot, re-seeds when history diverges" },
+        ] as const
+        dialog.replace(() => (
+          <DialogSelect
+            title="react-adapter transcript mode"
+            options={modes.map((mode) => ({ title: mode.title, value: mode.value, description: mode.description }))}
+            onSelect={(option) => {
+              dialog.clear()
+              void sdk.client.session
+                .reactMode({ sessionID: route.sessionID, mode: option.value ?? undefined })
+                .then((res) =>
+                  toast.show({
+                    message: res.data?.mode ? `Transcript mode: ${res.data.mode}` : "Transcript mode: provider default",
+                    variant: "success",
+                  }),
+                )
+                .catch((error) => toast.show({ message: errorMessage(error), variant: "error" }))
+            }}
+          />
+        ))
       },
     },
     {

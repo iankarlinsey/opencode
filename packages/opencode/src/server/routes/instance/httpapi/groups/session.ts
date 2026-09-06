@@ -74,6 +74,24 @@ export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput
 export const PermissionResponsePayload = Schema.Struct({
   response: PermissionV1.Reply,
 })
+/** react-adapter transcript layout; mirrors ReactAdapterConfig.MODES. */
+export const ReactMode = Schema.Literals(["alternating", "single", "epoch"])
+export const ReactStatus = Schema.Struct({
+  /** Per-session layout override; absent means the provider config decides. */
+  mode: Schema.optional(ReactMode),
+  /** Current epoch (epoch mode), without the snapshot text. */
+  epoch: Schema.optional(
+    Schema.Struct({
+      id: Schema.String,
+      covered: Schema.Number,
+      created: Schema.Number,
+    }),
+  ),
+})
+export const ReactModePayload = Schema.Struct({
+  /** Omit to clear the override so the provider config applies again. */
+  mode: Schema.optional(ReactMode),
+})
 
 export const SessionPaths = {
   list: root,
@@ -98,6 +116,9 @@ export const SessionPaths = {
   shell: `${root}/:sessionID/shell`,
   revert: `${root}/:sessionID/revert`,
   unrevert: `${root}/:sessionID/unrevert`,
+  react: `${root}/:sessionID/react`,
+  reactMode: `${root}/:sessionID/react/mode`,
+  reactReseed: `${root}/:sessionID/react/reseed`,
   permissions: `${root}/:sessionID/permissions/:permissionID`,
   deleteMessage: `${root}/:sessionID/message/:messageID`,
   deletePart: `${root}/:sessionID/message/:messageID/part/:partID`,
@@ -390,6 +411,45 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.unrevert",
             summary: "Restore reverted messages",
             description: "Restore all previously reverted messages in a session.",
+          }),
+        ),
+        HttpApiEndpoint.get("reactStatus", SessionPaths.react, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(ReactStatus, "react-adapter session state"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.reactStatus",
+            summary: "Get react-adapter state",
+            description: "Return the session's react-adapter transcript-mode override and current epoch, if any.",
+          }),
+        ),
+        HttpApiEndpoint.post("reactMode", SessionPaths.reactMode, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          payload: ReactModePayload,
+          success: described(ReactStatus, "react-adapter session state"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.reactMode",
+            summary: "Set react-adapter transcript mode",
+            description:
+              "Override the react-adapter transcript layout for this session (alternating, single, or epoch) without restarting; omit mode to clear the override. Also clears the current epoch so the next request re-seeds.",
+          }),
+        ),
+        HttpApiEndpoint.post("reactReseed", SessionPaths.reactReseed, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Boolean, "Epoch cleared"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.reactReseed",
+            summary: "Re-seed react-adapter epoch",
+            description:
+              "Clear the session's react-adapter epoch so the next model request re-sends the full transcript as a fresh conversation (recovers from a provider-side context desync).",
           }),
         ),
         HttpApiEndpoint.post("permissionRespond", SessionPaths.permissions, {

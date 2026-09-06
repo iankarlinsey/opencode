@@ -1018,6 +1018,60 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
+    "serves react-adapter session state routes",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const session = yield* createSession({ title: "react state" })
+        const status = pathFor(SessionPaths.react, { sessionID: session.id })
+
+        // nothing stored yet
+        expect(yield* requestJson<Record<string, unknown>>(status, { headers })).toEqual({})
+
+        // set an override
+        expect(
+          yield* requestJson<Record<string, unknown>>(pathFor(SessionPaths.reactMode, { sessionID: session.id }), {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ mode: "epoch" }),
+          }),
+        ).toEqual({ mode: "epoch" })
+        expect(yield* requestJson<Record<string, unknown>>(status, { headers })).toEqual({ mode: "epoch" })
+
+        // invalid mode is rejected
+        const bad = yield* request(pathFor(SessionPaths.reactMode, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ mode: "bogus" }),
+        })
+        expect(bad.status).toBe(400)
+
+        // reseed is idempotent
+        expect(
+          yield* requestJson<boolean>(pathFor(SessionPaths.reactReseed, { sessionID: session.id }), {
+            method: "POST",
+            headers,
+          }),
+        ).toBe(true)
+
+        // clear the override
+        expect(
+          yield* requestJson<Record<string, unknown>>(pathFor(SessionPaths.reactMode, { sessionID: session.id }), {
+            method: "POST",
+            headers,
+            body: JSON.stringify({}),
+          }),
+        ).toEqual({})
+
+        // unknown session
+        const missing = yield* request(pathFor(SessionPaths.react, { sessionID: "ses_httpapi_missing" }), { headers })
+        expect(missing.status).toBe(404)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
     "rejects part updates whose path and body ids disagree",
     () =>
       Effect.gen(function* () {

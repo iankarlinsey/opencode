@@ -14,6 +14,7 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
+import { Storage } from "@/storage/storage"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Effect, Option, Schema, Scope } from "effect"
@@ -35,6 +36,8 @@ import {
   ShellPayload,
   SummarizePayload,
   UpdatePayload,
+  ReactMode,
+  ReactModePayload,
 } from "../groups/session"
 import { PermissionNotFoundError } from "../errors"
 import * as SessionError from "./session-errors"
@@ -59,6 +62,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const todoSvc = yield* Todo.Service
     const summary = yield* SessionSummary.Service
     const events = yield* EventV2Bridge.Service
+    const storage = yield* Storage.Service
     const scope = yield* Scope.Scope
 
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
@@ -359,6 +363,48 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* SessionError.mapBusy(revertSvc.unrevert({ sessionID: ctx.params.sessionID }))
     })
 
+    // react-adapter per-session state lives in the key-value Storage; the
+    // adapter reads it through SessionPrompt on every request.
+    const reactStatus = Effect.fn("SessionHttpApi.reactStatus")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      return yield* readReact(ctx.params.sessionID)
+    })
+
+    const reactMode = Effect.fn("SessionHttpApi.reactMode")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof ReactModePayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const { sessionID } = ctx.params
+      if (ctx.payload.mode === undefined) yield* storage.remove(["react_mode", sessionID]).pipe(Effect.orDie)
+      else yield* storage.write(["react_mode", sessionID], { mode: ctx.payload.mode }).pipe(Effect.orDie)
+      // A layout change invalidates any epoch; the next request re-seeds.
+      yield* storage.remove(["react_epoch", sessionID]).pipe(Effect.orDie)
+      return yield* readReact(sessionID)
+    })
+
+    const reactReseed = Effect.fn("SessionHttpApi.reactReseed")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      yield* storage.remove(["react_epoch", ctx.params.sessionID]).pipe(Effect.orDie)
+      return true
+    })
+
+    const readReact = Effect.fnUntraced(function* (sessionID: SessionID) {
+      const epoch = yield* storage
+        .read<{ id: string; covered: number; created: number }>(["react_epoch", sessionID])
+        .pipe(Effect.catch(() => Effect.succeed(undefined)))
+      const mode = yield* storage
+        .read<{ mode: typeof ReactMode.Type }>(["react_mode", sessionID])
+        .pipe(
+          Effect.map((x) => x.mode),
+          Effect.catch(() => Effect.succeed(undefined)),
+        )
+      return {
+        ...(mode ? { mode } : {}),
+        ...(epoch ? { epoch: { id: epoch.id, covered: epoch.covered, created: epoch.created } } : {}),
+      }
+    })
+
     const permissionRespond = Effect.fn("SessionHttpApi.permissionRespond")(function* (ctx: {
       params: { sessionID: SessionID; permissionID: PermissionV1.ID }
       payload: typeof PermissionResponsePayload.Type
@@ -434,6 +480,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("shell", shell)
       .handle("revert", revert)
       .handle("unrevert", unrevert)
+      .handle("reactStatus", reactStatus)
+      .handle("reactMode", reactMode)
+      .handle("reactReseed", reactReseed)
       .handle("permissionRespond", permissionRespond)
       .handle("deleteMessage", deleteMessage)
       .handle("deletePart", deletePart)

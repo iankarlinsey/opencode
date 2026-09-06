@@ -205,6 +205,12 @@ import type {
   SessionPromptAsyncResponses,
   SessionPromptErrors,
   SessionPromptResponses,
+  SessionReactModeErrors,
+  SessionReactModeResponses,
+  SessionReactReseedErrors,
+  SessionReactReseedResponses,
+  SessionReactStatusErrors,
+  SessionReactStatusResponses,
   SessionRevertErrors,
   SessionRevertResponses,
   SessionShareErrors,
@@ -4321,6 +4327,109 @@ export class Session2 extends HeyApiClient {
     )
     return (options?.client ?? this.client).post<SessionUnrevertResponses, SessionUnrevertErrors, ThrowOnError>({
       url: "/session/{sessionID}/unrevert",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get react-adapter state
+   *
+   * Return the session's react-adapter transcript-mode override and current epoch, if any.
+   */
+  public reactStatus<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionReactStatusResponses, SessionReactStatusErrors, ThrowOnError>({
+      url: "/session/{sessionID}/react",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Set react-adapter transcript mode
+   *
+   * Override the react-adapter transcript layout for this session (alternating, single, or epoch) without restarting; omit mode to clear the override. Also clears the current epoch so the next request re-seeds.
+   */
+  public reactMode<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      mode?: "alternating" | "single" | "epoch"
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "mode" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionReactModeResponses, SessionReactModeErrors, ThrowOnError>({
+      url: "/session/{sessionID}/react/mode",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Re-seed react-adapter epoch
+   *
+   * Clear the session's react-adapter epoch so the next model request re-sends the full transcript as a fresh conversation (recovers from a provider-side context desync).
+   */
+  public reactReseed<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionReactReseedResponses, SessionReactReseedErrors, ThrowOnError>({
+      url: "/session/{sessionID}/react/reseed",
       ...options,
       ...params,
     })

@@ -10362,6 +10362,124 @@ export type SessionUnrevertResponses = {
 
 export type SessionUnrevertResponse = SessionUnrevertResponses[keyof SessionUnrevertResponses]
 
+export type SessionReactStatusData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/react"
+}
+
+export type SessionReactStatusErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionReactStatusError = SessionReactStatusErrors[keyof SessionReactStatusErrors]
+
+export type SessionReactStatusResponses = {
+  /**
+   * react-adapter session state
+   */
+  200: {
+    mode?: "alternating" | "single" | "epoch"
+    epoch?: {
+      id: string
+      covered: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    }
+  }
+}
+
+export type SessionReactStatusResponse = SessionReactStatusResponses[keyof SessionReactStatusResponses]
+
+export type SessionReactModeData = {
+  body?: {
+    mode?: "alternating" | "single" | "epoch"
+  }
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/react/mode"
+}
+
+export type SessionReactModeErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionReactModeError = SessionReactModeErrors[keyof SessionReactModeErrors]
+
+export type SessionReactModeResponses = {
+  /**
+   * react-adapter session state
+   */
+  200: {
+    mode?: "alternating" | "single" | "epoch"
+    epoch?: {
+      id: string
+      covered: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    }
+  }
+}
+
+export type SessionReactModeResponse = SessionReactModeResponses[keyof SessionReactModeResponses]
+
+export type SessionReactReseedData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/react/reseed"
+}
+
+export type SessionReactReseedErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionReactReseedError = SessionReactReseedErrors[keyof SessionReactReseedErrors]
+
+export type SessionReactReseedResponses = {
+  /**
+   * Epoch cleared
+   */
+  200: boolean
+}
+
+export type SessionReactReseedResponse = SessionReactReseedResponses[keyof SessionReactReseedResponses]
+
 export type PermissionRespondData = {
   body?: {
     response: "once" | "always" | "reject"

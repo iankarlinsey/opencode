@@ -1640,6 +1640,45 @@ const scenarios: Scenario[] = [
       "status",
     ),
   http.protected
+    .get("/session/{sessionID}/react", "session.reactStatus")
+    .seeded((ctx) => ctx.session({ title: "React status session" }))
+    .at((ctx) => ({ path: route("/session/{sessionID}/react", { sessionID: ctx.state.id }), headers: ctx.headers() }))
+    .json(200, (body) => {
+      object(body)
+      check(!("mode" in body) || typeof body.mode === "string", "react status mode should be absent or a string")
+    }),
+  http.protected
+    .get("/session/{sessionID}/react", "session.reactStatus.missing")
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/react", { sessionID: "ses_httpapi_missing" }),
+      headers: ctx.headers(),
+    }))
+    .status(404),
+  http.protected
+    .post("/session/{sessionID}/react/mode", "session.reactMode")
+    .mutating()
+    .seeded((ctx) => ctx.session({ title: "React mode session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/react/mode", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { mode: "epoch" },
+    }))
+    .json(200, (body) => {
+      object(body)
+      check(body.mode === "epoch", "react mode should echo the override")
+    }),
+  http.protected
+    .post("/session/{sessionID}/react/reseed", "session.reactReseed")
+    .mutating()
+    .seeded((ctx) => ctx.session({ title: "React reseed session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/react/reseed", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
+      check(body === true, "reseed should return true")
+    }),
+  http.protected
     .post("/session/{sessionID}/permissions/{permissionID}", "permission.respond")
     .seeded((ctx) => ctx.session({ title: "Deprecated permission session" }))
     .at((ctx) => ({
