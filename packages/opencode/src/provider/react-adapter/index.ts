@@ -1,3 +1,4 @@
+import { ReactAdapterDiagnostics } from "./diagnostics"
 import type {
   JSONSchema7,
   LanguageModelV3,
@@ -9,6 +10,9 @@ import type {
   LanguageModelV3StreamResult,
   LanguageModelV3Usage,
 } from "@ai-sdk/provider"
+import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
 import { ReactAdapterConfig } from "./config"
 import { downconvert } from "./downconvert"
 import { parse } from "./parse"
@@ -160,6 +164,8 @@ export function middleware(providerOptions: Record<string, unknown> | undefined)
   // array is constructed per request and transformParams always runs before
   // wrapStream/wrapGenerate for the same call, so a closure is safe here.
   let schemas: Record<string, JSONSchema7 | undefined> = {}
+  let originalParams: any
+  let downconvertedParams: any
 
   return [
     {
@@ -168,9 +174,36 @@ export function middleware(providerOptions: Record<string, unknown> | undefined)
         schemas = Object.fromEntries(
           (args.params.tools ?? []).flatMap((t) => (t.type === "function" ? [[t.name, t.inputSchema]] : [])),
         )
-        return downconvert(args.params, cfg)
+        const downconverted = downconvert(args.params, cfg)
+
+        originalParams = args.params
+        downconvertedParams = downconverted
+
+        if (process.env.OPENCODE_LOG_LEVEL === "DEBUG") {
+          const logPath = path.join(os.homedir(), ".local/share/opencode/log/opencode.log")
+          let logOutput = "\n=== REACT ADAPTER OUTBOUND PROMPT ===\n"
+          for (const msg of downconverted.prompt) {
+            logOutput += `\n[Role: ${msg.role}]\n`
+            if (Array.isArray(msg.content)) {
+              for (const part of msg.content) {
+                if (part.type === "text") logOutput += part.text + "\n"
+              }
+            } else if (typeof msg.content === "string") {
+              logOutput += msg.content + "\n"
+            }
+          }
+          logOutput += "\n=====================================\n\n"
+          try {
+            fs.appendFileSync(logPath, logOutput)
+          } catch (e) {
+            // Ignore logging errors
+          }
+        }
+
+        return downconverted
       },
       async wrapStream({ doStream, params, model }) {
+        ReactAdapterDiagnostics.logContext(originalParams, downconvertedParams, model)
         const { result, buffered } = await withEmptyRetry(cfg.retries, () => doStream(), params, model)
         if (!buffered) {
           // Retries exhausted: distinguishable error, never a silent stop.
@@ -191,6 +224,7 @@ export function middleware(providerOptions: Record<string, unknown> | undefined)
         return { ...result, stream: replay(synthesize(buffered, schemas)) }
       },
       async wrapGenerate({ doGenerate, params, model }) {
+        ReactAdapterDiagnostics.logContext(originalParams, downconvertedParams, model)
         let attempt = 0
         let generated = await doGenerate()
         while (isEmptyGenerate(generated) && attempt < cfg.retries) {

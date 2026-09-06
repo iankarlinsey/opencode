@@ -1726,6 +1726,64 @@ const layer = Layer.effect(
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
           const fetchFn = customFetch ?? fetch
           const opts = init ?? {}
+
+          if (process.env.OPENCODE_REACT_DIAGNOSTICS === "1" || process.env.OPENCODE_REACT_DIAGNOSTICS === "true" || process.env.OPENCODE_LOG_LEVEL === "DEBUG") {
+            try {
+              if (typeof opts.body === "string") {
+                const crypto = await import("node:crypto")
+                const fs = await import("node:fs")
+                const path = await import("node:path")
+                const os = await import("node:os")
+                
+                const bodyLen = Buffer.byteLength(opts.body, "utf8")
+                const bodySha = crypto.createHash("sha256").update(opts.body).digest("hex")
+                
+                let parsed: any = {}
+                try { parsed = JSON.parse(opts.body) } catch (e) {}
+                
+                const msgCount = Array.isArray(parsed.messages) ? parsed.messages.length : (Array.isArray(parsed.contents) ? parsed.contents.length : undefined)
+                const messages = Array.isArray(parsed.messages) ? parsed.messages : (Array.isArray(parsed.contents) ? parsed.contents : [])
+                
+                const roles = messages.map((m: any) => m.role ?? "unknown")
+                const msgHashes = messages.map((m: any) => {
+                  let content = ""
+                  if (typeof m.content === "string") content = m.content
+                  else if (Array.isArray(m.content)) content = m.content.map((p:any) => p.text ?? JSON.stringify(p)).join("")
+                  else content = JSON.stringify(m)
+                  return crypto.createHash("sha256").update(content).digest("hex")
+                })
+                
+                let hasCookie = false
+                if (opts.headers instanceof Headers) hasCookie = opts.headers.has("cookie")
+                else if (opts.headers) hasCookie = !!(opts.headers as any).cookie || !!(opts.headers as any).Cookie
+
+                const suspicious = {
+                  has_thread_id: !!parsed.thread_id,
+                  has_session_id: !!parsed.session_id,
+                  has_conversation_id: !!parsed.conversation_id,
+                  has_previous_response_id: !!parsed.previous_response_id,
+                  has_continuation: !!parsed.continuation,
+                  has_cache_id: !!parsed.cache_id,
+                  has_cookie: hasCookie,
+                }
+                
+                const reqId = crypto.randomUUID().slice(0, 8)
+                const timestamp = new Date().toISOString()
+                
+                let out = `[react-adapter network-debug] request=${reqId} timestamp=${timestamp}\n`
+                out += `bodyBytes=${bodyLen}\n`
+                out += `bodySha256=${bodySha}\n`
+                if (msgCount !== undefined) out += `messagesCount=${msgCount}\n`
+                out += `roles=${roles.join(", ")}\n`
+                out += `messageHashes=${msgHashes.join(", ")}\n`
+                out += `suspiciousFields=${JSON.stringify(suspicious)}\n`
+                out += "==========================================================\n"
+                
+                const logPath = path.join(os.homedir(), ".local/share/opencode/log/opencode.log")
+                fs.appendFileSync(logPath, out)
+              }
+            } catch (e) {}
+          }
           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
           const headerTimeoutCtl = typeof headerTimeoutMs === "number" ? timeoutController(headerTimeoutMs) : undefined
