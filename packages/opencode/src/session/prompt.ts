@@ -6,6 +6,8 @@ import os from "os"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
 import { SessionRevert } from "./revert"
+import { Storage } from "@/storage/storage"
+import type { ReactAdapter } from "@/provider/react-adapter"
 import { Session } from "./session"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
@@ -134,6 +136,7 @@ const layer = Layer.effect(
     const instruction = yield* Instruction.Service
     const state = yield* SessionRunState.Service
     const revert = yield* SessionRevert.Service
+    const storage = yield* Storage.Service
     const summary = yield* SessionSummary.Service
     const sys = yield* SystemPrompt.Service
     const llm = yield* LLM.Service
@@ -1269,12 +1272,29 @@ const layer = Layer.effect(
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            // react-adapter epoch mode: the persisted epoch (if any) and a
+            // per-session layout override, both keyed by session in storage.
+            // /reseed clears the epoch; /react <mode> writes the override.
+            const react: NonNullable<LLM.StreamInput["react"]> = {
+              epoch: yield* storage
+                .read<ReactAdapter.Epoch>(["react_epoch", sessionID])
+                .pipe(Effect.catch(() => Effect.succeed(undefined))),
+              mode: yield* storage
+                .read<{ mode: ReactAdapter.Mode }>(["react_mode", sessionID])
+                .pipe(
+                  Effect.map((x) => x.mode),
+                  Effect.catch(() => Effect.succeed(undefined)),
+                ),
+              save: (epoch) => storage.write(["react_epoch", sessionID], epoch).pipe(Effect.ignore),
+            }
+
             const result = yield* handle.process({
               user: lastUser,
               agent,
               permission: session.permission,
               sessionID,
               parentSessionID: session.parentID,
+              react,
               system,
               messages: [
                 ...modelMsgs,
@@ -1607,6 +1627,7 @@ export const node = LayerNode.make({
     SessionCompaction.node,
     Plugin.node,
     Command.node,
+    Storage.node,
     Config.node,
     Permission.node,
     FSUtil.node,

@@ -46,6 +46,16 @@ export type StreamInput = {
   tools: Record<string, Tool>
   retries?: number
   toolChoice?: "auto" | "required" | "none"
+  /**
+   * react-adapter runtime state for this session (epoch mode). Supplied by
+   * SessionPrompt for the main conversation; absent for auxiliary calls
+   * (titles, compaction summaries), which then run stateless.
+   */
+  react?: {
+    epoch?: ReactAdapter.Epoch
+    mode?: ReactAdapter.Mode
+    save: (epoch: ReactAdapter.Epoch) => Effect.Effect<void, unknown>
+  }
 }
 
 export type StreamRequest = StreamInput & {
@@ -343,7 +353,14 @@ const live: Layer.Layer<
               // Degraded-provider mode: converts native tool calling to a ReAct
               // text protocol when the provider config sets options.reactMode.
               // Returns [] otherwise, leaving behavior stock.
-              ...ReactAdapter.middleware(item.options),
+              ...ReactAdapter.middleware(
+                item.options,
+                input.react && {
+                  epoch: input.react.epoch,
+                  mode: input.react.mode,
+                  onSeed: (epoch) => bridge.promise(input.react!.save(epoch)),
+                },
+              ),
             ],
           }),
           experimental_telemetry: {

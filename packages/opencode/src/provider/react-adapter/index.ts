@@ -13,11 +13,26 @@ import type {
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { ReactAdapterConfig } from "./config"
-import { downconvert } from "./downconvert"
+import { ReactAdapterConfig, type Mode } from "./config"
+import { downconvert, type Epoch } from "./downconvert"
 import { parse } from "./parse"
 
 export * as ReactAdapter from "./index"
+export type { Epoch, Mode }
+
+/**
+ * Per-request runtime state supplied by opencode for epoch mode (and a
+ * per-session layout override). Everything is optional: without it the
+ * adapter is fully stateless and epoch mode degrades to single-message mode.
+ */
+export type Runtime = {
+  /** Persisted epoch for this session, if any. */
+  epoch?: Epoch
+  /** Per-session layout override (e.g. set by /react <mode>); wins over config. */
+  mode?: Mode
+  /** Persist a freshly seeded epoch. Awaited before the request goes out. */
+  onSeed?: (epoch: Epoch) => Promise<void>
+}
 
 /**
  * ReAct adapter (phase 3 assembly): AI SDK middleware that down-converts
@@ -155,9 +170,13 @@ function replay(parts: LanguageModelV3StreamPart[]): ReadableStream<LanguageMode
   })
 }
 
-export function middleware(providerOptions: Record<string, unknown> | undefined): LanguageModelV3Middleware[] {
-  const cfg = ReactAdapterConfig.resolve(providerOptions)
-  if (!cfg) return []
+export function middleware(
+  providerOptions: Record<string, unknown> | undefined,
+  runtime?: Runtime,
+): LanguageModelV3Middleware[] {
+  const resolved = ReactAdapterConfig.resolve(providerOptions)
+  if (!resolved) return []
+  const cfg = runtime?.mode ? { ...resolved, mode: runtime.mode } : resolved
 
   // transformParams strips `tools` from the outgoing call, but the parser
   // still needs the schemas for bare-string input recovery. The middleware
@@ -174,7 +193,14 @@ export function middleware(providerOptions: Record<string, unknown> | undefined)
         schemas = Object.fromEntries(
           (args.params.tools ?? []).flatMap((t) => (t.type === "function" ? [[t.name, t.inputSchema]] : [])),
         )
-        const downconverted = downconvert(args.params, cfg)
+        let seeding: Promise<void> | undefined
+        const downconverted = downconvert(args.params, cfg, {
+          epoch: runtime?.epoch,
+          onSeed: (epoch) => {
+            seeding = runtime?.onSeed?.(epoch)
+          },
+        })
+        await seeding
 
         originalParams = args.params
         downconvertedParams = downconverted

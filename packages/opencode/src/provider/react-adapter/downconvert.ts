@@ -5,7 +5,7 @@ import type {
 } from "@ai-sdk/provider"
 import type { Config } from "./config"
 import { normalize } from "./normalize"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 
 /**
  * Down-conversion (phase 1): rewrite an AI SDK v3 prompt — system messages,
@@ -102,16 +102,57 @@ Everything after the SESSION START line is the conversation so far, oldest turn 
 const END = "--- END OF TRANSCRIPT ---\nWrite the assistant's next reply now."
 
 /**
- * @param nonce Per-request token placed at the very start of the single
- * message (single-message mode only). Injectable for deterministic tests.
+ * Epoch mode state, persisted per session by opencode and handed back on
+ * every request. The snapshot is the exact first message of every request in
+ * the epoch; the hashes let the adapter detect that the history it covers
+ * has changed underneath it (rewind, compaction, prune, system-prompt edit).
  */
+export type Epoch = {
+  /** Nonce placed first in the snapshot; doubles as the epoch id. */
+  id: string
+  /** The exact first message of every request in this epoch. */
+  snapshot: string
+  /** Number of transcript turns the snapshot covers. */
+  covered: number
+  /** Hash of those covered turns as rendered at seed time. */
+  coveredHash: string
+  /** Hash of the preamble (system strings, tool catalog, rules) at seed time. */
+  preambleHash: string
+  /** Seed time, epoch milliseconds. Informational. */
+  created: number
+}
+
+export type Options = {
+  /** Per-request token placed at the very start of a single/seed message. Injectable for deterministic tests. */
+  nonce?: () => string
+  /** Current epoch, if opencode has one persisted for this session. */
+  epoch?: Epoch
+  /** Invoked (synchronously) when epoch mode seeds a new epoch; the caller persists it. */
+  onSeed?: (epoch: Epoch) => void
+}
+
+type Turn = { role: "user" | "assistant"; text: string }
+
+function sha256(text: string) {
+  return createHash("sha256").update(text).digest("hex")
+}
+
+function hashTurns(turns: Turn[]) {
+  return sha256(turns.map((turn) => `${turn.role}\n${turn.text}`).join("\u0000"))
+}
+
+function message(role: "user" | "assistant", text: string): LanguageModelV3Message {
+  return { role, content: [{ type: "text", text }] }
+}
+
 export function downconvert(
   params: LanguageModelV3CallOptions,
   cfg: Config,
-  nonce: () => string = randomUUID,
+  opts: Options = {},
 ): LanguageModelV3CallOptions {
+  const nonce = opts.nonce ?? randomUUID
   const system: string[] = []
-  const turns: { role: "user" | "assistant"; text: string }[] = []
+  const turns: Turn[] = []
   const push = (role: "user" | "assistant", text: string) => {
     if (!text) return
     const last = turns[turns.length - 1]
@@ -168,24 +209,58 @@ export function downconvert(
 
   const catalog = renderCatalog(params.tools)
   const rules = protocolRules(cfg.resultPrefix)
-  const stopSequences = [...new Set([...(params.stopSequences ?? []), `\n${cfg.resultPrefix}`, "\nObservation:"])]
+  const base = {
+    ...params,
+    tools: undefined,
+    toolChoice: undefined,
+    stopSequences: [...new Set([...(params.stopSequences ?? []), `\n${cfg.resultPrefix}`, "\nObservation:"])],
+  }
 
-  if (cfg.singleMessage) {
-    // One message per request. The endpoint's conversation key (first
-    // message) and the only content it forwards (last message) are then the
-    // same message, so its server-side store can never diverge from this
-    // prompt. The nonce goes FIRST so the key is new on every call regardless
-    // of how much of the message the endpoint hashes.
+  // One message holding everything: nonce, preamble, labeled turns. The
+  // endpoint's conversation key (first message) and the only content it
+  // forwards (last message) are then the same message, so its server-side
+  // store can never diverge from this prompt. The nonce goes FIRST so the key
+  // is new on every call regardless of how much of the message is hashed.
+  const singlePreamble = [...system, catalog, rules, EXAMPLES, TRANSCRIPT_RULES].filter((x) => x).join("\n\n")
+  const single = () => {
+    const id = nonce()
     const transcript = turns.map((turn) => `[${turn.role === "user" ? "USER" : "ASSISTANT"}]\n${turn.text}`).join("\n\n")
-    const text = [`Request ${nonce()}`, ...system, catalog, rules, EXAMPLES, TRANSCRIPT_RULES, DELIMITER, transcript, END]
-      .filter((x) => x)
-      .join("\n\n")
+    const text = [`Request ${id}`, singlePreamble, DELIMITER, transcript, END].filter((x) => x).join("\n\n")
+    return { id, text }
+  }
+
+  if (cfg.mode === "single") {
+    return { ...base, prompt: [message("user", single().text)] }
+  }
+
+  if (cfg.mode === "epoch") {
+    const preambleHash = sha256(singlePreamble)
+    const epoch = opts.epoch
+    // Re-seed unless the persisted snapshot still describes exactly the
+    // history we are about to send. Order matters: the role check needs the
+    // length check first.
+    const stale =
+      epoch === undefined ||
+      epoch.preambleHash !== preambleHash ||
+      turns.length <= epoch.covered ||
+      turns[epoch.covered].role !== "assistant" ||
+      hashTurns(turns.slice(0, epoch.covered)) !== epoch.coveredHash ||
+      (cfg.epochTurns > 0 && turns.length - epoch.covered >= cfg.epochTurns)
+    if (stale) {
+      const seeded = single()
+      opts.onSeed?.({
+        id: seeded.id,
+        snapshot: seeded.text,
+        covered: turns.length,
+        coveredHash: hashTurns(turns),
+        preambleHash,
+        created: Date.now(),
+      })
+      return { ...base, prompt: [message("user", seeded.text)] }
+    }
     return {
-      ...params,
-      prompt: [{ role: "user", content: [{ type: "text", text }] }],
-      tools: undefined,
-      toolChoice: undefined,
-      stopSequences,
+      ...base,
+      prompt: [message("user", epoch.snapshot), ...turns.slice(epoch.covered).map((turn) => message(turn.role, turn.text))],
     }
   }
 
@@ -193,13 +268,5 @@ export function downconvert(
   if (turns[0]?.role === "user") turns[0].text = `${preamble}\n\n${turns[0].text}`
   else turns.unshift({ role: "user", text: preamble })
 
-  return {
-    ...params,
-    prompt: turns.map(
-      (turn): LanguageModelV3Message => ({ role: turn.role, content: [{ type: "text", text: turn.text }] }),
-    ),
-    tools: undefined,
-    toolChoice: undefined,
-    stopSequences,
-  }
+  return { ...base, prompt: turns.map((turn) => message(turn.role, turn.text)) }
 }

@@ -23,17 +23,33 @@
  * }
  * ```
  *
- * `"singleMessage": true` in the react block changes the transcript layout:
- * instead of alternating user/assistant messages, every request carries the
- * whole conversation (nonce, preamble, labeled turns) inside ONE user
- * message. Use it against endpoints that keep a server-side conversation
- * keyed on the first message and forward only the last message of each
- * request (observed with the corporate STARK shim): with a single message,
- * "first" and "last" are the same message, so the endpoint's store can never
- * diverge from opencode's history — rewind works and there is no hidden
- * retention limit. Cost: no server-side reuse, one large message per call.
+ * `"mode"` in the react block selects the transcript layout. Background: the
+ * corporate STARK shim keeps a server-side conversation keyed on the content
+ * of the FIRST message and forwards only its stored history plus the LAST
+ * message of each request, ignoring the rest of the body. Rewind therefore
+ * never reaches the model and the store has a hidden retention wall.
+ *
+ * - `"alternating"` (default): plain user/assistant messages, preamble in the
+ *   first user message. Fastest on a well-behaved endpoint; broken on STARK
+ *   after a rewind or ~100 messages.
+ * - `"single"`: every request is ONE user message (nonce, preamble, labeled
+ *   turns). First and last message are the same, so the shim's store can never
+ *   diverge. Always correct, but the whole transcript is prefilled on every
+ *   call. `"singleMessage": true` is an alias.
+ * - `"epoch"`: alternating messages whose first message is a fixed SNAPSHOT of
+ *   the transcript (nonce first), created by a single-message "re-seed" request.
+ *   The shim caches the epoch; only the re-seed pays full prefill. The adapter
+ *   re-seeds whenever the snapshot no longer matches the current history
+ *   (rewind, compaction, prune, system-prompt change), when `epochTurns` new
+ *   turns have accumulated, or when the persisted epoch is cleared (manual
+ *   /reseed). Needs opencode to persist the epoch per session; without that
+ *   plumbing every call re-seeds, i.e. behaves like `"single"`.
  */
 export * as ReactAdapterConfig from "./config"
+
+export type Mode = "alternating" | "single" | "epoch"
+
+export const MODES: readonly Mode[] = ["alternating", "single", "epoch"]
 
 export type Config = {
   /** Prefix for injected tool results. Deliberately NOT "Observation" — that label is high-frequency ReAct training data and participates in echo/recitation failures. */
@@ -42,8 +58,14 @@ export type Config = {
   retries: number
   /** Per-tool truncation cap overrides in characters; the "default" key overrides the fallback cap. */
   caps: Record<string, number>
-  /** Send the entire transcript as one user message per request (see module doc). Default false. */
-  singleMessage: boolean
+  /** Transcript layout (see module doc). Default "alternating"; `singleMessage: true` is an alias for "single". */
+  mode: Mode
+  /** Epoch mode: re-seed once this many transcript turns have accumulated since the last seed; 0 disables the periodic re-seed. Default 40. */
+  epochTurns: number
+}
+
+export function isMode(value: unknown): value is Mode {
+  return typeof value === "string" && (MODES as readonly string[]).includes(value)
 }
 
 export function resolve(options: Record<string, unknown> | undefined): Config | undefined {
@@ -56,6 +78,8 @@ export function resolve(options: Record<string, unknown> | undefined): Config | 
     retries: typeof react["retries"] === "number" ? react["retries"] : 2,
     caps:
       typeof react["caps"] === "object" && react["caps"] !== null ? (react["caps"] as Record<string, number>) : {},
-    singleMessage: react["singleMessage"] === true,
+    mode: isMode(react["mode"]) ? react["mode"] : react["singleMessage"] === true ? "single" : "alternating",
+    epochTurns:
+      typeof react["epochTurns"] === "number" && react["epochTurns"] >= 0 ? Math.floor(react["epochTurns"]) : 40,
   }
 }

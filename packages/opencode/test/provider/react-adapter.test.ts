@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import { parse } from "@/provider/react-adapter/parse"
 import { normalize } from "@/provider/react-adapter/normalize"
-import { downconvert } from "@/provider/react-adapter/downconvert"
+import { downconvert, type Epoch } from "@/provider/react-adapter/downconvert"
 import { ReactAdapterConfig } from "@/provider/react-adapter/config"
 import { ReactAdapter } from "@/provider/react-adapter"
 
@@ -289,12 +289,12 @@ describe("react-adapter downconvert single-message mode", () => {
   }
 
   test("emits exactly one user message", () => {
-    const out = downconvert(params, single, nonce)
+    const out = downconvert(params, single, { nonce })
     expect(out.prompt.map((m) => m.role)).toEqual(["user"])
   })
 
   test("nonce first, then preamble, transcript rules, delimiter, labeled turns in order, end marker", () => {
-    const text = textOf(downconvert(params, single, nonce))
+    const text = textOf(downconvert(params, single, { nonce }))
     expect(text.startsWith("Request NONCE-1234\n")).toBe(true)
     const order = [
       "Request NONCE-1234",
@@ -323,27 +323,27 @@ describe("react-adapter downconvert single-message mode", () => {
   })
 
   test("differs between calls only by the nonce", () => {
-    const a = textOf(downconvert(params, single, () => "A"))
-    const b = textOf(downconvert(params, single, () => "B"))
+    const a = textOf(downconvert(params, single, { nonce: () => "A" }))
+    const b = textOf(downconvert(params, single, { nonce: () => "B" }))
     expect(a).not.toBe(b)
     expect(a.replace("Request A", "Request X")).toBe(b.replace("Request B", "Request X"))
   })
 
   test("strips tools/toolChoice and extends stop sequences like alternating mode", () => {
-    const out = downconvert(params, single, nonce)
+    const out = downconvert(params, single, { nonce })
     expect(out.tools).toBeUndefined()
     expect(out.toolChoice).toBeUndefined()
     expect(out.stopSequences).toEqual(["\nEXISTING", "\nTOOL_RESULT", "\nObservation:"])
   })
 
   test("no user turn at all still yields one message ending with the end marker", () => {
-    const out = downconvert({ ...params, prompt: [params.prompt[0]] }, single, nonce)
+    const out = downconvert({ ...params, prompt: [params.prompt[0]] }, single, { nonce })
     expect(out.prompt).toHaveLength(1)
     expect(textOf(out).endsWith(END_MARKER)).toBe(true)
   })
 
   test("default config is unaffected (alternating layout)", () => {
-    const out = downconvert(params, alternating, nonce)
+    const out = downconvert(params, alternating, { nonce })
     expect(out.prompt.map((m) => m.role)).toEqual(["user", "assistant", "user"])
     expect(textOf(out)).not.toContain("Request NONCE-1234")
     expect(textOf(out)).not.toContain("[USER]")
@@ -364,8 +364,8 @@ describe("react-adapter downconvert single-message mode", () => {
       { role: "user", content: [{ type: "text", text: "UNIQUE-NEW" }] },
     ]
     for (const cfg of [single, alternating]) {
-      const full = downconvert({ ...params, prompt: [...A, ...B, ...C] }, cfg, nonce)
-      const rewound = downconvert({ ...params, prompt: [...A, ...NEW] }, cfg, nonce)
+      const full = downconvert({ ...params, prompt: [...A, ...B, ...C] }, cfg, { nonce })
+      const rewound = downconvert({ ...params, prompt: [...A, ...NEW] }, cfg, { nonce })
       const fullText = full.prompt.map((m, i) => textOf(full, i)).join("\n")
       const rewoundText = rewound.prompt.map((m, i) => textOf(rewound, i)).join("\n")
       expect(fullText).toContain("UNIQUE-C-USER")
@@ -379,6 +379,167 @@ describe("react-adapter downconvert single-message mode", () => {
 
 const END_MARKER = "--- END OF TRANSCRIPT ---\nWrite the assistant's next reply now."
 
+describe("react-adapter downconvert epoch mode", () => {
+  const epochCfg = ReactAdapterConfig.resolve({ reactMode: true, react: { mode: "epoch" } })!
+  const textOf = (out: LanguageModelV3CallOptions, i = 0) =>
+    (out.prompt[i].content as { type: "text"; text: string }[])[0].text
+  const nonces = (...ids: string[]) => {
+    const queue = [...ids]
+    return () => queue.shift() ?? "NONCE-OVERFLOW"
+  }
+
+  // Seed prompt: 3 transcript turns (user, assistant action, merged tool-result+user).
+  const seedPrompt: LanguageModelV3CallOptions = {
+    prompt: [
+      { role: "system", content: "You are opencode." },
+      { role: "user", content: [{ type: "text", text: "What files are here?" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I will list the files." },
+          { type: "tool-call", toolCallId: "c1", toolName: "bash", input: { command: "ls" } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "c1", toolName: "bash", output: { type: "text", value: "a.ts\nb.ts" } }],
+      },
+      { role: "user", content: [{ type: "text", text: "Now summarize them." }] },
+    ],
+    tools: [{ type: "function", name: "bash", description: "Run a command", inputSchema: SCHEMAS.bash }],
+  }
+  // Two more turns after the seed: the model's reply and the next user prompt.
+  const later: LanguageModelV3CallOptions["prompt"] = [
+    { role: "assistant", content: [{ type: "text", text: "Final Answer: two TypeScript files." }] },
+    { role: "user", content: [{ type: "text", text: "Next question." }] },
+  ]
+  const extended: LanguageModelV3CallOptions = { ...seedPrompt, prompt: [...seedPrompt.prompt, ...later] }
+
+  const seed = (params = seedPrompt, cfg = epochCfg, nonce = nonces("EPOCH-1")) => {
+    const seeds: Epoch[] = []
+    const out = downconvert(params, cfg, { nonce, onSeed: (e) => seeds.push(e) })
+    return { out, seeds }
+  }
+
+  test("no epoch: seeds with a single message and reports the epoch to persist", () => {
+    const { out, seeds } = seed()
+    expect(out.prompt.map((m) => m.role)).toEqual(["user"])
+    expect(seeds).toHaveLength(1)
+    const epoch = seeds[0]
+    expect(epoch.id).toBe("EPOCH-1")
+    expect(textOf(out).startsWith("Request EPOCH-1\n")).toBe(true)
+    expect(epoch.snapshot).toBe(textOf(out))
+    expect(epoch.covered).toBe(3)
+    expect(epoch.coveredHash).toMatch(/^[0-9a-f]{64}$/)
+    expect(epoch.preambleHash).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  test("matching epoch: snapshot first, then only the new turns, no re-seed", () => {
+    const { seeds } = seed()
+    const epoch = seeds[0]
+    const reseeds: unknown[] = []
+    const out = downconvert(extended, epochCfg, { epoch, nonce: nonces("EPOCH-2"), onSeed: (e) => reseeds.push(e) })
+    expect(reseeds).toHaveLength(0)
+    expect(out.prompt.map((m) => m.role)).toEqual(["user", "assistant", "user"])
+    expect(textOf(out, 0)).toBe(epoch.snapshot)
+    expect(textOf(out, 1)).toBe("Final Answer: two TypeScript files.")
+    expect(textOf(out, 2)).toBe("Next question.")
+    // preamble lives only in the snapshot
+    const all = out.prompt.map((_, i) => textOf(out, i)).join("\n")
+    expect(all.split("# Available tools").length - 1).toBe(1)
+    expect(out.tools).toBeUndefined()
+    expect(out.stopSequences).toEqual(["\nTOOL_RESULT", "\nObservation:"])
+  })
+
+  test("rewind (covered history changed): hash mismatch triggers re-seed with a fresh nonce", () => {
+    const { seeds } = seed()
+    const epoch = seeds[0]
+    const rewound: LanguageModelV3CallOptions = {
+      ...extended,
+      prompt: extended.prompt.map((m, i) =>
+        i === 1 ? { role: "user" as const, content: [{ type: "text" as const, text: "A different first prompt." }] } : m,
+      ),
+    }
+    const reseeds: { id: string }[] = []
+    const out = downconvert(rewound, epochCfg, { epoch, nonce: nonces("EPOCH-2"), onSeed: (e) => reseeds.push(e) })
+    expect(reseeds.map((e) => e.id)).toEqual(["EPOCH-2"])
+    expect(out.prompt).toHaveLength(1)
+    expect(textOf(out)).toContain("A different first prompt.")
+  })
+
+  test("system prompt change: re-seeds", () => {
+    const { seeds } = seed()
+    const changed: LanguageModelV3CallOptions = {
+      ...extended,
+      prompt: [{ role: "system", content: "You are opencode. (AGENTS.md edited)" }, ...extended.prompt.slice(1)],
+    }
+    const reseeds: unknown[] = []
+    const out = downconvert(changed, epochCfg, { epoch: seeds[0], nonce: nonces("EPOCH-2"), onSeed: (e) => reseeds.push(e) })
+    expect(reseeds).toHaveLength(1)
+    expect(out.prompt).toHaveLength(1)
+  })
+
+  test("periodic: re-seeds once epochTurns new turns have accumulated; 0 disables", () => {
+    const { seeds } = seed()
+    const two = ReactAdapterConfig.resolve({ reactMode: true, react: { mode: "epoch", epochTurns: 2 } })!
+    const never = ReactAdapterConfig.resolve({ reactMode: true, react: { mode: "epoch", epochTurns: 0 } })!
+    const a: unknown[] = []
+    const outA = downconvert(extended, two, { epoch: seeds[0], nonce: nonces("EPOCH-2"), onSeed: (e) => a.push(e) })
+    expect(a).toHaveLength(1)
+    expect(outA.prompt).toHaveLength(1)
+    const b: unknown[] = []
+    const outB = downconvert(extended, never, { epoch: seeds[0], nonce: nonces("EPOCH-2"), onSeed: (e) => b.push(e) })
+    expect(b).toHaveLength(0)
+    expect(outB.prompt).toHaveLength(3)
+  })
+
+  test("no new turns since the seed: re-seeds rather than resending the snapshot alone", () => {
+    const { seeds } = seed()
+    const reseeds: unknown[] = []
+    const out = downconvert(seedPrompt, epochCfg, { epoch: seeds[0], nonce: nonces("EPOCH-2"), onSeed: (e) => reseeds.push(e) })
+    expect(reseeds).toHaveLength(1)
+    expect(out.prompt).toHaveLength(1)
+  })
+
+  test("next turn after the snapshot is not an assistant reply: re-seeds", () => {
+    // Seed on the first two turns only, so the third (user) turn follows the snapshot directly.
+    const short: LanguageModelV3CallOptions = { ...seedPrompt, prompt: seedPrompt.prompt.slice(0, 3) }
+    const { seeds } = seed(short)
+    expect(seeds[0].covered).toBe(2)
+    const reseeds: unknown[] = []
+    const out = downconvert(seedPrompt, epochCfg, { epoch: seeds[0], nonce: nonces("EPOCH-2"), onSeed: (e) => reseeds.push(e) })
+    expect(reseeds).toHaveLength(1)
+    expect(out.prompt).toHaveLength(1)
+  })
+
+  test("config: mode parsing, singleMessage alias, epochTurns default and clamp", () => {
+    expect(ReactAdapterConfig.resolve({ reactMode: true, react: { singleMessage: true } })!.mode).toBe("single")
+    expect(ReactAdapterConfig.resolve({ reactMode: true, react: { mode: "epoch" } })!.mode).toBe("epoch")
+    expect(ReactAdapterConfig.resolve({ reactMode: true, react: { mode: "bogus" } })!.mode).toBe("alternating")
+    expect(ReactAdapterConfig.resolve({ reactMode: true, react: {} })!.epochTurns).toBe(40)
+    expect(ReactAdapterConfig.resolve({ reactMode: true, react: { epochTurns: 7.9 } })!.epochTurns).toBe(7)
+    expect(ReactAdapterConfig.resolve({ reactMode: true, react: { epochTurns: -1 } })!.epochTurns).toBe(40)
+  })
+
+  test("middleware: runtime mode override wins over config; onSeed is awaited before the request", async () => {
+    const asStream = (params: LanguageModelV3CallOptions) => ({ type: "stream" as const, params, model: {} as any })
+    const single = ReactAdapter.middleware({ reactMode: true }, { mode: "single" })[0]
+    const outSingle = await single.transformParams!(asStream(seedPrompt))
+    expect(outSingle.prompt).toHaveLength(1)
+    expect(textOf(outSingle).startsWith("Request ")).toBe(true)
+
+    let saved: { id: string; covered: number } | undefined
+    const epochMw = ReactAdapter.middleware(
+      { reactMode: true, react: { mode: "epoch" } },
+      { onSeed: async (e) => void (saved = e) },
+    )[0]
+    const outEpoch = await epochMw.transformParams!(asStream(seedPrompt))
+    expect(outEpoch.prompt).toHaveLength(1)
+    expect(saved?.covered).toBe(3)
+    expect(textOf(outEpoch)).toBe(`Request ${saved!.id}` + textOf(outEpoch).slice(`Request ${saved!.id}`.length))
+  })
+})
+
 describe("react-adapter activation", () => {
   test("flag absent or false resolves to no middleware (stock behavior)", () => {
     expect(ReactAdapter.middleware(undefined)).toEqual([])
@@ -389,7 +550,7 @@ describe("react-adapter activation", () => {
 
   test("reactMode true with empty react object uses defaults", () => {
     const cfg = ReactAdapterConfig.resolve({ reactMode: true, react: {} })!
-    expect(cfg).toEqual({ resultPrefix: "TOOL_RESULT", retries: 2, caps: {}, singleMessage: false })
+    expect(cfg).toEqual({ resultPrefix: "TOOL_RESULT", retries: 2, caps: {}, mode: "alternating", epochTurns: 40 })
     expect(ReactAdapter.middleware({ reactMode: true })).toHaveLength(1)
   })
 })
