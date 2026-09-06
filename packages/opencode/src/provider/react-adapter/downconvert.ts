@@ -5,6 +5,7 @@ import type {
 } from "@ai-sdk/provider"
 import type { Config } from "./config"
 import { normalize } from "./normalize"
+import { randomUUID } from "node:crypto"
 
 /**
  * Down-conversion (phase 1): rewrite an AI SDK v3 prompt — system messages,
@@ -94,7 +95,21 @@ function renderToolResult(part: LanguageModelV3ToolResultPart, cfg: Config) {
 
 const NUDGE = "Continue: state your next Thought and Action, or give your Final Answer."
 
-export function downconvert(params: LanguageModelV3CallOptions, cfg: Config): LanguageModelV3CallOptions {
+const TRANSCRIPT_RULES = `# Transcript format
+
+Everything after the SESSION START line is the conversation so far, oldest turn first. Each turn begins with a line that is exactly [USER] or [ASSISTANT]. Turns marked [ASSISTANT] are your own earlier replies; turns marked [USER] are the user's messages and the results of your tool calls. Write only the assistant's next reply, following the response protocol above. Do not repeat the transcript and do not write [USER] or [ASSISTANT] lines yourself.`
+
+const END = "--- END OF TRANSCRIPT ---\nWrite the assistant's next reply now."
+
+/**
+ * @param nonce Per-request token placed at the very start of the single
+ * message (single-message mode only). Injectable for deterministic tests.
+ */
+export function downconvert(
+  params: LanguageModelV3CallOptions,
+  cfg: Config,
+  nonce: () => string = randomUUID,
+): LanguageModelV3CallOptions {
   const system: string[] = []
   const turns: { role: "user" | "assistant"; text: string }[] = []
   const push = (role: "user" | "assistant", text: string) => {
@@ -151,9 +166,30 @@ export function downconvert(params: LanguageModelV3CallOptions, cfg: Config): La
     }
   }
 
-  const preamble = [...system, renderCatalog(params.tools), protocolRules(cfg.resultPrefix), EXAMPLES, DELIMITER]
-    .filter((x) => x)
-    .join("\n\n")
+  const catalog = renderCatalog(params.tools)
+  const rules = protocolRules(cfg.resultPrefix)
+  const stopSequences = [...new Set([...(params.stopSequences ?? []), `\n${cfg.resultPrefix}`, "\nObservation:"])]
+
+  if (cfg.singleMessage) {
+    // One message per request. The endpoint's conversation key (first
+    // message) and the only content it forwards (last message) are then the
+    // same message, so its server-side store can never diverge from this
+    // prompt. The nonce goes FIRST so the key is new on every call regardless
+    // of how much of the message the endpoint hashes.
+    const transcript = turns.map((turn) => `[${turn.role === "user" ? "USER" : "ASSISTANT"}]\n${turn.text}`).join("\n\n")
+    const text = [`Request ${nonce()}`, ...system, catalog, rules, EXAMPLES, TRANSCRIPT_RULES, DELIMITER, transcript, END]
+      .filter((x) => x)
+      .join("\n\n")
+    return {
+      ...params,
+      prompt: [{ role: "user", content: [{ type: "text", text }] }],
+      tools: undefined,
+      toolChoice: undefined,
+      stopSequences,
+    }
+  }
+
+  const preamble = [...system, catalog, rules, EXAMPLES, DELIMITER].filter((x) => x).join("\n\n")
   if (turns[0]?.role === "user") turns[0].text = `${preamble}\n\n${turns[0].text}`
   else turns.unshift({ role: "user", text: preamble })
 
@@ -164,6 +200,6 @@ export function downconvert(params: LanguageModelV3CallOptions, cfg: Config): La
     ),
     tools: undefined,
     toolChoice: undefined,
-    stopSequences: [...new Set([...(params.stopSequences ?? []), `\n${cfg.resultPrefix}`, "\nObservation:"])],
+    stopSequences,
   }
 }

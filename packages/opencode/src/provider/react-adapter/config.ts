@@ -22,6 +22,16 @@
  *   }
  * }
  * ```
+ *
+ * `"singleMessage": true` in the react block changes the transcript layout:
+ * instead of alternating user/assistant messages, every request carries the
+ * whole conversation (nonce, preamble, labeled turns) inside ONE user
+ * message. Use it against endpoints that keep a server-side conversation
+ * keyed on the first message and forward only the last message of each
+ * request (observed with the corporate STARK shim): with a single message,
+ * "first" and "last" are the same message, so the endpoint's store can never
+ * diverge from opencode's history — rewind works and there is no hidden
+ * retention limit. Cost: no server-side reuse, one large message per call.
  */
 export * as ReactAdapterConfig from "./config"
 
@@ -32,6 +42,8 @@ export type Config = {
   retries: number
   /** Per-tool truncation cap overrides in characters; the "default" key overrides the fallback cap. */
   caps: Record<string, number>
+  /** Send the entire transcript as one user message per request (see module doc). Default false. */
+  singleMessage: boolean
 }
 
 export function resolve(options: Record<string, unknown> | undefined): Config | undefined {
@@ -44,5 +56,6 @@ export function resolve(options: Record<string, unknown> | undefined): Config | 
     retries: typeof react["retries"] === "number" ? react["retries"] : 2,
     caps:
       typeof react["caps"] === "object" && react["caps"] !== null ? (react["caps"] as Record<string, number>) : {},
+    singleMessage: react["singleMessage"] === true,
   }
 }

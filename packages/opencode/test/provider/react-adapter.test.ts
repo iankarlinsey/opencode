@@ -259,6 +259,126 @@ describe("react-adapter downconvert", () => {
   })
 })
 
+describe("react-adapter downconvert single-message mode", () => {
+  const single = ReactAdapterConfig.resolve({ reactMode: true, react: { singleMessage: true } })!
+  const alternating = ReactAdapterConfig.resolve({ reactMode: true, react: {} })!
+  const nonce = () => "NONCE-1234"
+  const textOf = (out: LanguageModelV3CallOptions, i = 0) =>
+    (out.prompt[i].content as { type: "text"; text: string }[])[0].text
+
+  const params: LanguageModelV3CallOptions = {
+    prompt: [
+      { role: "system", content: "You are opencode. Answer in fewer than 3 lines." },
+      { role: "user", content: [{ type: "text", text: "What files are here?" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I will list the files." },
+          { type: "tool-call", toolCallId: "c1", toolName: "bash", input: { command: "ls" } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "c1", toolName: "bash", output: { type: "text", value: "a.ts\nb.ts" } }],
+      },
+      { role: "user", content: [{ type: "text", text: "Now summarize them." }] },
+    ],
+    tools: [{ type: "function", name: "bash", description: "Run a command", inputSchema: SCHEMAS.bash }],
+    toolChoice: { type: "auto" },
+    stopSequences: ["\nEXISTING"],
+  }
+
+  test("emits exactly one user message", () => {
+    const out = downconvert(params, single, nonce)
+    expect(out.prompt.map((m) => m.role)).toEqual(["user"])
+  })
+
+  test("nonce first, then preamble, transcript rules, delimiter, labeled turns in order, end marker", () => {
+    const text = textOf(downconvert(params, single, nonce))
+    expect(text.startsWith("Request NONCE-1234\n")).toBe(true)
+    const order = [
+      "Request NONCE-1234",
+      "You are opencode",
+      "# Available tools",
+      "## bash",
+      "# Response protocol",
+      "# Format examples",
+      "# Transcript format",
+      "--- SESSION START ---",
+      "[USER]\nWhat files are here?",
+      '[ASSISTANT]\nThought: I will list the files.\nAction: bash\nAction Input: {"command":"ls"}',
+      "[USER]\nTOOL_RESULT [bash]:\na.ts\nb.ts",
+      "Continue: state your next Thought and Action, or give your Final Answer.",
+      "Now summarize them.",
+      "--- END OF TRANSCRIPT ---",
+    ]
+    const positions = order.map((s) => text.indexOf(s))
+    expect(positions.every((p) => p >= 0)).toBe(true)
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+    // tool result and the following user message stay one merged [USER] turn
+    // (count label lines after the delimiter; the rules paragraph mentions the labels too)
+    const body = text.slice(text.indexOf("--- SESSION START ---"))
+    expect(body.split("\n[USER]\n").length - 1).toBe(2)
+    expect(body.split("\n[ASSISTANT]\n").length - 1).toBe(1)
+  })
+
+  test("differs between calls only by the nonce", () => {
+    const a = textOf(downconvert(params, single, () => "A"))
+    const b = textOf(downconvert(params, single, () => "B"))
+    expect(a).not.toBe(b)
+    expect(a.replace("Request A", "Request X")).toBe(b.replace("Request B", "Request X"))
+  })
+
+  test("strips tools/toolChoice and extends stop sequences like alternating mode", () => {
+    const out = downconvert(params, single, nonce)
+    expect(out.tools).toBeUndefined()
+    expect(out.toolChoice).toBeUndefined()
+    expect(out.stopSequences).toEqual(["\nEXISTING", "\nTOOL_RESULT", "\nObservation:"])
+  })
+
+  test("no user turn at all still yields one message ending with the end marker", () => {
+    const out = downconvert({ ...params, prompt: [params.prompt[0]] }, single, nonce)
+    expect(out.prompt).toHaveLength(1)
+    expect(textOf(out).endsWith(END_MARKER)).toBe(true)
+  })
+
+  test("default config is unaffected (alternating layout)", () => {
+    const out = downconvert(params, alternating, nonce)
+    expect(out.prompt.map((m) => m.role)).toEqual(["user", "assistant", "user"])
+    expect(textOf(out)).not.toContain("Request NONCE-1234")
+    expect(textOf(out)).not.toContain("[USER]")
+  })
+
+  test("rewind: output derives only from the current prompt, in both modes", () => {
+    const A = params.prompt.slice(0, 2)
+    const B: LanguageModelV3CallOptions["prompt"] = [
+      { role: "assistant", content: [{ type: "text", text: "UNIQUE-B-TURN" }] },
+      { role: "user", content: [{ type: "text", text: "UNIQUE-B-USER" }] },
+    ]
+    const C: LanguageModelV3CallOptions["prompt"] = [
+      { role: "assistant", content: [{ type: "text", text: "UNIQUE-C-TURN" }] },
+      { role: "user", content: [{ type: "text", text: "UNIQUE-C-USER" }] },
+    ]
+    const NEW: LanguageModelV3CallOptions["prompt"] = [
+      { role: "assistant", content: [{ type: "text", text: "Final Answer: ok" }] },
+      { role: "user", content: [{ type: "text", text: "UNIQUE-NEW" }] },
+    ]
+    for (const cfg of [single, alternating]) {
+      const full = downconvert({ ...params, prompt: [...A, ...B, ...C] }, cfg, nonce)
+      const rewound = downconvert({ ...params, prompt: [...A, ...NEW] }, cfg, nonce)
+      const fullText = full.prompt.map((m, i) => textOf(full, i)).join("\n")
+      const rewoundText = rewound.prompt.map((m, i) => textOf(rewound, i)).join("\n")
+      expect(fullText).toContain("UNIQUE-C-USER")
+      for (const s of ["UNIQUE-B-TURN", "UNIQUE-B-USER", "UNIQUE-C-TURN", "UNIQUE-C-USER"]) {
+        expect(rewoundText).not.toContain(s)
+      }
+      expect(rewoundText).toContain("UNIQUE-NEW")
+    }
+  })
+})
+
+const END_MARKER = "--- END OF TRANSCRIPT ---\nWrite the assistant's next reply now."
+
 describe("react-adapter activation", () => {
   test("flag absent or false resolves to no middleware (stock behavior)", () => {
     expect(ReactAdapter.middleware(undefined)).toEqual([])
@@ -269,7 +389,7 @@ describe("react-adapter activation", () => {
 
   test("reactMode true with empty react object uses defaults", () => {
     const cfg = ReactAdapterConfig.resolve({ reactMode: true, react: {} })!
-    expect(cfg).toEqual({ resultPrefix: "TOOL_RESULT", retries: 2, caps: {} })
+    expect(cfg).toEqual({ resultPrefix: "TOOL_RESULT", retries: 2, caps: {}, singleMessage: false })
     expect(ReactAdapter.middleware({ reactMode: true })).toHaveLength(1)
   })
 })
