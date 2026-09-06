@@ -53,6 +53,14 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   bashDefaultTimeoutMs: positiveInteger("OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"),
   experimentalNativeLlm: bool("OPENCODE_EXPERIMENTAL_NATIVE_LLM"),
   experimentalWebSockets: bool("OPENCODE_EXPERIMENTAL_WEBSOCKETS"),
+  /**
+   * Legacy provider discovery: also load providers found via environment
+   * API keys, stored auth, plugin loaders and the models.dev catalog. Off by
+   * default so that only providers declared in the config file's `provider`
+   * block (or named in `enabled_providers`) can ever be used; with no config
+   * there are no providers, never a public fallback.
+   */
+  providerAutoload: bool("OPENCODE_PROVIDER_AUTOLOAD"),
   client: Config.string("OPENCODE_CLIENT").pipe(Config.withDefault("cli")),
 }) {}
 

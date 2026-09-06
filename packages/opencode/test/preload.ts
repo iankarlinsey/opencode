@@ -83,6 +83,11 @@ delete process.env["OTEL_EXPORTER_OTLP_ENDPOINT"]
 delete process.env["OTEL_EXPORTER_OTLP_HEADERS"]
 delete process.env["OTEL_RESOURCE_ATTRIBUTES"]
 
+// Keep legacy provider discovery (env keys, stored auth, catalog autoload) for
+// the suite; the strict config-declared-only default is covered explicitly in
+// test/provider/provider.test.ts.
+process.env["OPENCODE_PROVIDER_AUTOLOAD"] = "true"
+
 // Use in-memory sqlite
 process.env["OPENCODE_DB"] = ":memory:"
 

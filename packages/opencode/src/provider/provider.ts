@@ -1375,10 +1375,18 @@ const layer = Layer.effect(
         const disabled = new Set(cfg.disabled_providers ?? [])
         const enabled = cfg.enabled_providers ? new Set(cfg.enabled_providers) : null
 
+        // Admission rule. A provider is usable only if it is declared in the
+        // config file's `provider` block or named in `enabled_providers`;
+        // everything discovered another way (environment API keys, stored
+        // auth, plugin loaders, catalog autoload) is dropped. With no config
+        // there are no providers, never a public fallback. The legacy
+        // discover-everything behavior is behind OPENCODE_PROVIDER_AUTOLOAD.
+        const declared = new Set(configProviders.map(([id]) => ProviderV2.ID.make(id)))
         function isProviderAllowed(providerID: ProviderV2.ID): boolean {
-          if (enabled && !enabled.has(providerID)) return false
           if (disabled.has(providerID)) return false
-          return true
+          if (enabled) return enabled.has(providerID)
+          if (runtimeFlags.providerAutoload) return true
+          return declared.has(providerID)
         }
 
         for (const hook of plugins) {

@@ -86,6 +86,9 @@ const languageBaseURL = (language: unknown) => (language as { config: { baseURL:
 
 const it = testEffect(LayerNode.compile(LayerNode.group([Provider.node, Env.node, Plugin.node])))
 const experimentalModels = testEffect(providerLayer({ enableExperimentalModels: true }))
+// The production default: OPENCODE_PROVIDER_AUTOLOAD unset. test/preload.ts
+// turns autoload on for the rest of the suite.
+const strict = testEffect(providerLayer({ providerAutoload: false }))
 
 const alphaProviderConfig = {
   provider: {
@@ -108,6 +111,70 @@ const alphaProviderConfig = {
     },
   },
 }
+
+strict.instance(
+  "strict default: an environment API key alone does not load a provider",
+  Effect.gen(function* () {
+    yield* setProcessEnv("ANTHROPIC_API_KEY", "test-api-key")
+    yield* setProcessEnv("OPENAI_API_KEY", "test-openai-key")
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.anthropic]).toBeUndefined()
+    expect(providers[ProviderV2.ID.openai]).toBeUndefined()
+    expect(Object.keys(providers)).toEqual([])
+  }),
+)
+
+strict.instance(
+  "strict default: no config means no providers and a typed defaultModel error",
+  Effect.gen(function* () {
+    yield* setProcessEnv("ANTHROPIC_API_KEY", "test-api-key")
+    expect(Object.keys(yield* list)).toEqual([])
+    const error = yield* Provider.use.defaultModel().pipe(Effect.flip)
+    expect(error).toBeInstanceOf(Provider.NoProvidersError)
+  }),
+)
+
+strict.instance(
+  "strict default: a provider declared in config loads, secret still comes from env",
+  Effect.gen(function* () {
+    yield* setProcessEnv("ANTHROPIC_API_KEY", "test-api-key")
+    yield* setProcessEnv("OPENAI_API_KEY", "test-openai-key")
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.anthropic]).toBeDefined()
+    expect(providers[ProviderV2.ID.openai]).toBeUndefined()
+  }),
+  { config: { provider: { anthropic: {} } } },
+)
+
+strict.instance(
+  "strict default: a custom config provider loads without any public provider",
+  Effect.gen(function* () {
+    yield* setProcessEnv("ANTHROPIC_API_KEY", "test-api-key")
+    const providers = yield* list
+    expect(Object.keys(providers)).toEqual(["custom-provider"])
+  }),
+  { config: alphaProviderConfig },
+)
+
+strict.instance(
+  "strict default: enabled_providers admits an undeclared provider",
+  Effect.gen(function* () {
+    yield* setProcessEnv("ANTHROPIC_API_KEY", "test-api-key")
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.anthropic]).toBeDefined()
+  }),
+  { config: { enabled_providers: ["anthropic"] } },
+)
+
+strict.instance(
+  "strict default: disabled_providers still excludes a declared provider",
+  Effect.gen(function* () {
+    yield* setProcessEnv("ANTHROPIC_API_KEY", "test-api-key")
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.anthropic]).toBeUndefined()
+  }),
+  { config: { provider: { anthropic: {} }, disabled_providers: ["anthropic"] } },
+)
 
 it.instance("provider loaded from env variable", () =>
   Effect.gen(function* () {
