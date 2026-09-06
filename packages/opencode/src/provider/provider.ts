@@ -1,5 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import os from "os"
+import fs from "fs"
+import { createHash, randomUUID } from "node:crypto"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import fuzzysort from "fuzzysort"
 import { Config } from "@/config/config"
@@ -33,6 +35,47 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
+
+// react-adapter network diagnostics: one request record and one paired
+// response record per fetch, gated on OPENCODE_REACT_DIAGNOSTICS=1|true or
+// OPENCODE_LOG_LEVEL=DEBUG. Never logs the request body or a successful
+// response body; secrets in headers are redacted.
+const DIAG_REDACT = new Set(["authorization", "proxy-authorization", "x-api-key", "api-key", "cookie", "set-cookie"])
+
+function diagEnabled() {
+  const flag = process.env.OPENCODE_REACT_DIAGNOSTICS
+  return flag === "1" || flag === "true" || process.env.OPENCODE_LOG_LEVEL === "DEBUG"
+}
+
+function diagHeaders(headers: unknown): Record<string, string> {
+  const out: Record<string, string> = {}
+  const put = (k: string, v: string) => {
+    const key = k.toLowerCase()
+    out[key] = DIAG_REDACT.has(key) ? "<redacted>" : v
+  }
+  if (headers instanceof Headers) headers.forEach((v, k) => put(k, v))
+  else if (Array.isArray(headers)) for (const [k, v] of headers) put(String(k), String(v))
+  else if (headers && typeof headers === "object")
+    for (const [k, v] of Object.entries(headers)) if (v !== undefined) put(k, String(v))
+  return out
+}
+
+function diagUrl(input: unknown) {
+  try {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url
+    const url = new URL(raw)
+    return url.origin + url.pathname
+  } catch {
+    return "<unknown>"
+  }
+}
+
+function diagWrite(text: string) {
+  try {
+    fs.mkdirSync(Global.Path.log, { recursive: true })
+    fs.appendFileSync(path.join(Global.Path.log, "opencode.log"), text)
+  } catch {}
+}
 
 function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   if (typeof ms !== "number" || ms <= 0) return res
@@ -1735,62 +1778,54 @@ const layer = Layer.effect(
           const fetchFn = customFetch ?? fetch
           const opts = init ?? {}
 
-          if (process.env.OPENCODE_REACT_DIAGNOSTICS === "1" || process.env.OPENCODE_REACT_DIAGNOSTICS === "true" || process.env.OPENCODE_LOG_LEVEL === "DEBUG") {
+          const diagnostics = diagEnabled()
+          const reqId = diagnostics ? randomUUID().slice(0, 8) : ""
+          const started = Date.now()
+          if (diagnostics) {
             try {
+              let out = `[react-adapter network-debug] request=${reqId} stage=request timestamp=${new Date().toISOString()}\n`
+              out += `url=${diagUrl(input)}\n`
+              out += `method=${opts.method ?? "GET"}\n`
+              out += `requestHeaders=${JSON.stringify(diagHeaders(opts.headers))}\n`
               if (typeof opts.body === "string") {
-                const crypto = await import("node:crypto")
-                const fs = await import("node:fs")
-                const path = await import("node:path")
-                const os = await import("node:os")
-                
-                const bodyLen = Buffer.byteLength(opts.body, "utf8")
-                const bodySha = crypto.createHash("sha256").update(opts.body).digest("hex")
-                
+                out += `bodyBytes=${Buffer.byteLength(opts.body, "utf8")}\n`
+                out += `bodySha256=${createHash("sha256").update(opts.body).digest("hex")}\n`
                 let parsed: any = {}
-                try { parsed = JSON.parse(opts.body) } catch (e) {}
-                
-                const msgCount = Array.isArray(parsed.messages) ? parsed.messages.length : (Array.isArray(parsed.contents) ? parsed.contents.length : undefined)
-                const messages = Array.isArray(parsed.messages) ? parsed.messages : (Array.isArray(parsed.contents) ? parsed.contents : [])
-                
-                const roles = messages.map((m: any) => m.role ?? "unknown")
-                const msgHashes = messages.map((m: any) => {
-                  let content = ""
-                  if (typeof m.content === "string") content = m.content
-                  else if (Array.isArray(m.content)) content = m.content.map((p:any) => p.text ?? JSON.stringify(p)).join("")
-                  else content = JSON.stringify(m)
-                  return crypto.createHash("sha256").update(content).digest("hex")
-                })
-                
-                let hasCookie = false
-                if (opts.headers instanceof Headers) hasCookie = opts.headers.has("cookie")
-                else if (opts.headers) hasCookie = !!(opts.headers as any).cookie || !!(opts.headers as any).Cookie
-
-                const suspicious = {
+                try {
+                  parsed = JSON.parse(opts.body)
+                } catch {}
+                const messages: any[] = Array.isArray(parsed.messages)
+                  ? parsed.messages
+                  : Array.isArray(parsed.contents)
+                    ? parsed.contents
+                    : []
+                if (Array.isArray(parsed.messages) || Array.isArray(parsed.contents)) {
+                  out += `messagesCount=${messages.length}\n`
+                  out += `roles=${messages.map((m: any) => m.role ?? "unknown").join(", ")}\n`
+                  out += `messageHashes=${messages
+                    .map((m: any) => {
+                      const content =
+                        typeof m.content === "string"
+                          ? m.content
+                          : Array.isArray(m.content)
+                            ? m.content.map((p: any) => p.text ?? JSON.stringify(p)).join("")
+                            : JSON.stringify(m)
+                      return createHash("sha256").update(content).digest("hex")
+                    })
+                    .join(", ")}\n`
+                }
+                out += `suspiciousFields=${JSON.stringify({
                   has_thread_id: !!parsed.thread_id,
                   has_session_id: !!parsed.session_id,
                   has_conversation_id: !!parsed.conversation_id,
                   has_previous_response_id: !!parsed.previous_response_id,
                   has_continuation: !!parsed.continuation,
                   has_cache_id: !!parsed.cache_id,
-                  has_cookie: hasCookie,
-                }
-                
-                const reqId = crypto.randomUUID().slice(0, 8)
-                const timestamp = new Date().toISOString()
-                
-                let out = `[react-adapter network-debug] request=${reqId} timestamp=${timestamp}\n`
-                out += `bodyBytes=${bodyLen}\n`
-                out += `bodySha256=${bodySha}\n`
-                if (msgCount !== undefined) out += `messagesCount=${msgCount}\n`
-                out += `roles=${roles.join(", ")}\n`
-                out += `messageHashes=${msgHashes.join(", ")}\n`
-                out += `suspiciousFields=${JSON.stringify(suspicious)}\n`
-                out += "==========================================================\n"
-                
-                const logPath = path.join(os.homedir(), ".local/share/opencode/log/opencode.log")
-                fs.appendFileSync(logPath, out)
+                })}\n`
               }
-            } catch (e) {}
+              out += "==========================================================\n"
+              diagWrite(out)
+            } catch {}
           }
           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
@@ -1806,11 +1841,44 @@ const layer = Layer.effect(
           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
           if (combined) opts.signal = combined
 
-          const res = await fetchFn(input, {
-            ...opts,
-            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-            timeout: false,
-          }).finally(() => headerTimeoutCtl?.clear())
+          let res: Response
+          try {
+            res = await fetchFn(input, {
+              ...opts,
+              // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+              timeout: false,
+            }).finally(() => headerTimeoutCtl?.clear())
+          } catch (error) {
+            if (diagnostics) {
+              const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+              diagWrite(
+                `[react-adapter network-debug] request=${reqId} stage=response elapsedMs=${Date.now() - started}\n` +
+                  `error=${message}\n` +
+                  "==========================================================\n",
+              )
+            }
+            throw error
+          }
+
+          if (diagnostics) {
+            try {
+              let out = `[react-adapter network-debug] request=${reqId} stage=response elapsedMs=${Date.now() - started}\n`
+              out += `status=${res.status} ${res.statusText}\n`
+              out += `responseHeaders=${JSON.stringify(diagHeaders(res.headers))}\n`
+              // Only error responses get a body preview: a 2xx body is the
+              // model's reply (possibly a stream) and stays out of the log.
+              if (!res.ok) {
+                const preview = await res
+                  .clone()
+                  .text()
+                  .then((text) => text.slice(0, 2048))
+                  .catch(() => "<unreadable>")
+                out += `bodyPreview=${JSON.stringify(preview)}\n`
+              }
+              out += "==========================================================\n"
+              diagWrite(out)
+            } catch {}
+          }
 
           if (!chunkAbortCtl) return res
           return wrapSSE(res, chunkTimeout, chunkAbortCtl)
